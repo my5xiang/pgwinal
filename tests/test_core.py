@@ -41,6 +41,49 @@ class TestSql(unittest.TestCase):
         self.assertIn("public", do)
         self.assertIn("DELETE FROM", undo)
 
+    def test_generate_delete_ctid_without_old_tuple(self):
+        rel = RelationDef(
+            rel_oid=40484,
+            schema_name="bdsy",
+            rel_name="sys_log",
+            relfilenode=47194,
+            reltablespace=0,
+            db_oid=32085,
+            attributes=[AttributeDef(1, "id", 1043, "varchar")],
+        )
+        gen = SqlGenerator(SchemaChangeTracker(DataDictionary(relations=[rel])))
+        do, undo, notes = gen.generate("DELETE", rel, {}, None, 0, 32085, 40484, ctid=(598, 13))
+        self.assertIn("bdsy", do)
+        self.assertIn("ctid", do)
+        self.assertIn("(598,13)", do)
+        self.assertIn("undo DELETE missing", undo)
+
+
+class TestDictResolve(unittest.TestCase):
+    def test_find_relation_oid_fallback_after_rewrite(self):
+        d = DataDictionary(
+            relations=[
+                RelationDef(
+                    rel_oid=40484,
+                    schema_name="bdsy",
+                    rel_name="sys_log",
+                    relfilenode=47194,  # rewritten
+                    reltablespace=0,
+                    db_oid=32085,
+                    attributes=[],
+                )
+            ]
+        )
+        rel, how = d.find_relation(40484, 32085)
+        self.assertIsNotNone(rel)
+        self.assertEqual(how, "rel_oid")
+        self.assertEqual(rel.rel_name, "sys_log")
+
+        # current relfilenode still wins
+        rel2, how2 = d.find_relation(47194, 32085)
+        self.assertEqual(how2, "relfilenode")
+        self.assertEqual(rel2.rel_name, "sys_log")
+
 
 class TestScan(unittest.TestCase):
     def test_scan_synthetic(self):

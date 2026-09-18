@@ -47,10 +47,17 @@ class SchemaChangeTracker:
         self.unknown_relations: dict[tuple[int, int, int], int] = {}
         self.partial_decodes: list[str] = []
         self.notes: list[str] = []
+        self.last_resolve_how: str = "none"
 
     def resolve(self, spc: int, db: int, rel: int) -> Optional[RelationDef]:
-        found = self.dictionary.find_by_relfilenode(rel, db)
-        if found:
+        found, how = self.dictionary.find_relation(rel, db)
+        self.last_resolve_how = how
+        if found is not None:
+            if how == "rel_oid":
+                self.notes.append(
+                    f"relfilenode={rel} 按 oid 回退匹配到 {found.qualified_name()}"
+                    f"（当前 relfilenode={found.relfilenode}，表可能被重写）"
+                )
             return found
         key = (spc, db, rel)
         self.unknown_relations[key] = self.unknown_relations.get(key, 0) + 1
@@ -97,9 +104,11 @@ class SqlGenerator:
         db: int = 0,
         rel_number: int = 0,
         where_keys: Optional[dict[str, Any]] = None,
+        ctid: Optional[tuple[int, int]] = None,
+        resolve_how: str = "relfilenode",
     ) -> tuple[str, str, str]:
         """Return (do_sql, undo_sql, notes)."""
-        notes = []
+        notes: list[str] = []
         table = self._table(rel, spc, db, rel_number)
         if rel is None:
             notes.append(
@@ -107,9 +116,17 @@ class SqlGenerator:
                 f"将生成占位 SQL，请检查字典时间线。"
             )
             # Still try to emit structure-agnostic SQL using raw keys
-            return self._fallback_sql(op, table, new_values, old_values), (
+            fallback = self._fallback_sql(op, table, new_values, old_values)
+            if ctid:
+                fallback += f"\n-- physical ctid=({ctid[0]},{ctid[1]}) db_oid={db} relfilenode={rel_number}\n"
+            return fallback, (
                 "-- undo unavailable without data dictionary"
             ), "; ".join(notes)
+        if resolve_how == "rel_oid":
+            notes.append(
+                f"字典按 oid 回退解析：WAL relfilenode={rel_number} → "
+                f"{table} (当前 relfilenode={rel.relfilenode})"
+            )
 
         cols = [a for a in rel.attributes if not a.is_dropped]
         if new_values and any(
@@ -141,7 +158,12 @@ class SqlGenerator:
                     sets.append(f"{quote_ident(c.attname)} = {literal(new_values[c.attname])}")
             if not sets:
                 sets = ["/* no column change detected */"]
-            do = f"UPDATE {table} SET {', '.join(sets)} {self._where(where_keys or where)};"
+            w = where_keys or where
+            if not w and ctid:
+                w_sql = f"WHERE ctid = '({ctid[0]},{ctid[1]})'"
+            else:
+                w_sql = self._where(w)
+            do = f"UPDATE {table} SET {', '.join(sets)} {w_sql};"
             # undo: reverse set
             if old_values:
                 undo_sets = [
@@ -166,13 +188,23 @@ class SqlGenerator:
                 for c in cols
                 if old_values and c.attname in old_values and old_values.get(c.attname) is not None
             }
-            do = f"DELETE FROM {table} {self._where(where)};"
+            if where:
+                do = f"DELETE FROM {table} {self._where(where)};"
+            elif ctid:
+                do = f"DELETE FROM {table} WHERE ctid = '({ctid[0]},{ctid[1]})';"
+                notes.append("DELETE 未携带业务键/旧元组，DO SQL 使用 ctid 定位")
+            else:
+                do = f"DELETE FROM {table} {self._where(where)};"
             if old_values:
                 col_names = [quote_ident(c.attname) for c in cols if c.attname in old_values]
                 val_list = [literal(old_values.get(c.attname)) for c in cols if c.attname in old_values]
                 undo = f"INSERT INTO {table} ({', '.join(col_names)}) VALUES ({', '.join(val_list)});"
             else:
-                undo = f"-- undo DELETE missing old key/tuple image on {table}"
+                undo = (
+                    f"-- undo DELETE missing old key/tuple image on {table}\n"
+                    + (f"-- physical ctid=({ctid[0]},{ctid[1]})\n" if ctid else "")
+                    + "-- 需完整 page image / 业务备份才能还原 INSERT UNDO"
+                )
                 notes.append("DELETE 未包含旧元组（仅 offnum/infobits），无法生成精确 UNDO")
             return do, undo, "; ".join(notes)
 

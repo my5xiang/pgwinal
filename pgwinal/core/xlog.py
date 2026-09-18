@@ -103,6 +103,21 @@ class WalScanner:
         for idx, path in enumerate(sorted(self.paths, key=lambda p: p.name.lower())):
             if progress_cb:
                 progress_cb(f"扫描文件 ({idx+1}/{len(self.paths)}): {path.name}")
+            # warn when copied filename does not match page header segment
+            try:
+                with open(path, "rb") as fh:
+                    hdr = parse_page_header(fh.read(XLOG_PAGE_HDR_SIZE))
+                if hdr.pageaddr and len(path.name) >= 24:
+                    logid = (hdr.pageaddr >> 32) & 0xFFFFFFFF
+                    segno = (hdr.pageaddr >> 24) & 0xFF
+                    correct = f"{hdr.tli:08X}{logid:08X}{segno:08X}"
+                    if path.name[:24].upper() != correct:
+                        if progress_cb:
+                            progress_cb(
+                                f"警告: 文件名 {path.name} 与页头段号不符，建议改名为 {correct}"
+                            )
+            except Exception:
+                pass
             yield from self.scan_file(path)
         if progress_cb:
             progress_cb("扫描完成")
@@ -330,13 +345,20 @@ def collect_wal_files(path: Path) -> list[Path]:
         return [path]
     if not path.is_dir():
         return []
+
+    def _is_hex_token(s: str) -> bool:
+        return bool(s) and all(c in "0123456789abcdefABCDEF" for c in s)
+
     files: list[Path] = []
     for p in path.iterdir():
         if not p.is_file():
             continue
         name = p.name
-        # classic WAL segment: 24 hex digits e.g. 000000010000000000000001
-        if len(name) >= 24 and name[:16].isdigit() and name[16:].isdigit():
+        # classic WAL segment: 24 hex digits e.g. 000000010000000000000001 / ...0000006F
+        if len(name) >= 24 and _is_hex_token(name[:16]) and _is_hex_token(name[16:24]):
+            files.append(p)
+            continue
+        if len(name) == 24 and _is_hex_token(name):
             files.append(p)
             continue
         if p.suffix.lower() in (".wal", ".log", ".partial"):

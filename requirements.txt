@@ -1,4 +1,4 @@
 # pgwinal 运行依赖（GUI 使用标准库 tkinter，无需额外安装）
 # 可选：连接 PostgreSQL 生成数据字典
-psycopg2-binary>=2.9.9; platform_system == "Windows"
-psycopg2-binary>=2.9.9; platform_system != "Windows"
+psycopg[binary]>=3.2
+psycopg2-binary>=2.9.9

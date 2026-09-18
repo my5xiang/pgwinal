@@ -22,6 +22,7 @@ from ..constants import (
     XLOG_HEAP_INSERT,
     XLOG_HEAP_LOCK,
     XLOG_HEAP_OPMASK,
+    XLOG_HEAP_UPDATE,
     XLOG_HEAP2_MULTI_INSERT,
     XLOG_XACT_COMMIT,
     XLOG_XACT_COMMIT_PREPARED,
@@ -72,36 +73,64 @@ class WalParseEngine:
     ) -> dict:
         options = options or ParseOptions()
         files: list[Path] = []
+        missing: list[str] = []
         for p in paths:
-            files.extend(collect_wal_files(Path(p)))
+            path = Path(p)
+            found = collect_wal_files(path)
+            if not found and not path.exists():
+                missing.append(str(path))
+                continue
+            files.extend(found)
         files = sorted(set(files), key=lambda x: x.name.lower())
+        if missing:
+            log_partial = f"跳过不存在的路径 {len(missing)} 个: " + ", ".join(Path(m).name for m in missing[:8])
+            if progress:
+                progress(log_partial)
+        if not files:
+            raise FileNotFoundError(
+                "未找到可解析的 WAL 文件"
+                + (f"（以下路径不存在: {', '.join(missing[:5])}）" if missing else "")
+            )
         for f in files:
             self.results.add_wal_file(str(f))
-        if not files:
-            raise FileNotFoundError("未找到可解析的 WAL 文件")
 
         def log(msg: str):
             if progress:
                 progress(msg)
 
         log(f"开始解析，共 {len(files)} 个文件")
+        try:
+            self.results.clear_contents()
+        except Exception:
+            pass
 
         # Pass 1: collect commit xids
         commit_xids: set[int] = set()
         commit_ts: dict[int, str] = {}
+        filter_uncommitted = options.only_committed
         if options.only_committed:
             log("Pass1: 收集事务提交信息 ...")
             scanner = WalScanner(files, seg_size=self.seg_size)
             for rec in scanner.scan(progress_cb=log):
-                self.stats["records"] += 1
                 if rec.rmid == RM_XACT_ID:
                     op = rec.info & 0xE0
                     if op in (XLOG_XACT_COMMIT, XLOG_XACT_COMMIT_PREPARED):
                         commit_xids.add(rec.xid)
                         commit_ts[rec.xid] = self._parse_commit_ts(rec)
                         self.stats["commits"] += 1
+                elif rec.rmid in (RM_HEAP_ID, RM_HEAP2_ID):
+                    self.stats["heap_records_pass1"] = self.stats.get("heap_records_pass1", 0) + 1
             self.stats["committed_xids"] = len(commit_xids)
             log(f"Pass1 完成: commits={len(commit_xids)}")
+            if not commit_xids and self.stats.get("heap_records_pass1", 0) > 0:
+                filter_uncommitted = False
+                msg = (
+                    "提供的 WAL 中未找到 COMMIT 记录（可能段文件不完整），"
+                    "将解析全部堆变更（含可能未提交事务）。"
+                )
+                self.stats["commit_filter_disabled"] = True
+                self.tracker.notes.append(msg)
+                log("警告: " + msg)
 
         # Pass 2: decode heap changes
         log("Pass2: 解析堆变更并生成 SQL ...")
@@ -112,9 +141,10 @@ class WalParseEngine:
             if options.max_records and total >= options.max_records:
                 break
             total += 1
+            self.stats["records"] = total
             if total % 20000 == 0:
                 log(f"... 已扫描 {total} 条记录，已生成 {self.stats['heap_changes']} 条变更")
-            if options.only_committed and rec.xid not in commit_xids:
+            if filter_uncommitted and rec.xid not in commit_xids:
                 # still allow if xid==0
                 if rec.xid != 0:
                     continue
@@ -122,6 +152,7 @@ class WalParseEngine:
                 ch = self._decode_record(rec, options, commit_ts.get(rec.xid))
             except Exception as e:
                 self.stats["errors"] += 1
+                self.tracker.notes.append(f"decode error xid={rec.xid} rmid={rec.rmid}: {e}")
                 continue
             if ch is None:
                 continue
@@ -229,7 +260,16 @@ class WalParseEngine:
 
         values = decode_tuple_values(td, rel, payload[5:])
         do, undo, notes = self.sqlgen.generate(
-            "INSERT", rel, values, None, spc, db, relno, where_keys=None
+            "INSERT",
+            rel,
+            values,
+            None,
+            spc,
+            db,
+            relno,
+            where_keys=None,
+            ctid=(block_num, offnum),
+            resolve_how=getattr(self.tracker, "last_resolve_how", "none"),
         )
         # refine undo/delete by non-null key candidates
         if rel and values:
@@ -326,6 +366,8 @@ class WalParseEngine:
             db,
             relno,
             where_keys=None,
+            ctid=(rec.blocks[0].block_num if rec.blocks else 0, new_off or old_off),
+            resolve_how=getattr(self.tracker, "last_resolve_how", "none"),
         )
         if hot:
             notes = (notes + "; " if notes else "") + "HOT_UPDATE"
@@ -371,7 +413,16 @@ class WalParseEngine:
                 old_values = decode_tuple_values(td, rel, main[13:])
 
         do, undo, notes = self.sqlgen.generate(
-            "DELETE", rel, {}, old_values or None, spc, db, relno, where_keys=None
+            "DELETE",
+            rel,
+            {},
+            old_values or None,
+            spc,
+            db,
+            relno,
+            where_keys=None,
+            ctid=(rec.blocks[0].block_num if rec.blocks else 0, offnum),
+            resolve_how=getattr(self.tracker, "last_resolve_how", "none"),
         )
         self.stats["heap_changes"] += 1
         return ChangeRecord(
@@ -455,7 +506,15 @@ class WalParseEngine:
             )
             values = decode_tuple_values(td, rel, chunk)
             do, undo, notes = self.sqlgen.generate(
-                "MULTI_INSERT", rel, values, None, spc, db, relno
+                "MULTI_INSERT",
+                rel,
+                values,
+                None,
+                spc,
+                db,
+                relno,
+                ctid=(block_num, i),
+                resolve_how=getattr(self.tracker, "last_resolve_how", "none"),
             )
             self.stats["heap_changes"] += 1
             out.append(

@@ -54,11 +54,35 @@ class DataDictionary:
                 return exact[0]
         return cands[0] if cands else None
 
-    def find_by_oid(self, rel_oid: int) -> Optional[RelationDef]:
-        for r in self.relations:
-            if r.rel_oid == rel_oid:
-                return r
-        return None
+    def find_by_oid(self, rel_oid: int, db_oid: int | None = None) -> Optional[RelationDef]:
+        cands = [r for r in self.relations if r.rel_oid == rel_oid]
+        if db_oid is not None:
+            exact = [r for r in cands if r.db_oid == db_oid]
+            if exact:
+                return exact[0]
+        return cands[0] if cands else None
+
+    def find_relation(
+        self, relfilenode: int, db_oid: int | None = None
+    ) -> tuple[Optional[RelationDef], str]:
+        """
+        Resolve a WAL physical rel number to a catalog relation.
+
+        Returns (RelationDef|None, how) where how is:
+          relfilenode / rel_oid / none
+        Fallback to rel_oid covers tables rewritten after the WAL was written
+        (VACUUM FULL / CLUSTER): old relfilenode often equals the stable oid.
+        """
+        found = self.find_by_relfilenode(relfilenode, db_oid)
+        if found is not None:
+            return found, "relfilenode"
+        # Avoid false positive when another live table currently owns this relfilenode
+        current_fn = self.find_by_relfilenode(relfilenode)
+        if current_fn is None:
+            found = self.find_by_oid(relfilenode, db_oid)
+            if found is not None:
+                return found, "rel_oid"
+        return None, "none"
 
 
 DEFAULT_DICT_PATH = Path("dict/pgwinal_dict.sqlite")
@@ -70,7 +94,7 @@ class DictStore:
     def __init__(self, path: Path | str = DEFAULT_DICT_PATH):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
+        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
 

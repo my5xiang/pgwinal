@@ -13,7 +13,8 @@ class ResultStore:
     def __init__(self, path: Path | str = "result/pgwinal_results.sqlite"):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
+        # GUI parse runs in a worker thread; allow same connection across threads
+        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init()
 
@@ -23,6 +24,7 @@ class ResultStore:
     def clear_contents(self) -> None:
         self.conn.execute("DELETE FROM walminer_contents")
         self.conn.execute("DELETE FROM parse_meta")
+        self.conn.execute("DELETE FROM wal_files")
         self.conn.commit()
 
     def _init(self) -> None:

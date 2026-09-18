@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Optional
+from typing import Callable, Optional
 
 from ..dictstore.builder import build_dictionary_from_postgres
 from ..dictstore.schema import DictStore
@@ -69,13 +70,66 @@ class App(tk.Tk):
         self.result_path = self.base_dir / "result" / "pgwinal_results.sqlite"
         self.wal_paths: list[Path] = []
         self._parsing = False
+        self._ui_q: queue.Queue = queue.Queue()
+        self._ui_polling = False
 
         self.dict_store = DictStore(self.dict_path)
         self.result_store = ResultStore(self.result_path)
 
         self._setup_style()
         self._build_ui()
+        self._clear_session_data()
         self._refresh_status()
+
+    def _clear_session_data(self) -> None:
+        """New GUI session: drop last run's WAL/results so UI starts empty."""
+        self.wal_paths.clear()
+        try:
+            self.result_store.clear_contents()
+        except Exception:
+            pass
+        if hasattr(self, "wal_list"):
+            self.wal_list.delete(0, tk.END)
+        if hasattr(self, "wal_count"):
+            self.wal_count.configure(text="0")
+        if hasattr(self, "tree"):
+            for i in self.tree.get_children():
+                self.tree.delete(i)
+        if hasattr(self, "log"):
+            self.log.delete("1.0", tk.END)
+        if hasattr(self, "row_count_label"):
+            self.row_count_label.configure(text="0 rows")
+
+    def _post_ui(self, fn: Callable[[], None]) -> None:
+        """Thread-safe: worker threads must not touch Tkinter directly."""
+        self._ui_q.put(fn)
+
+    def _drain_ui_queue(self) -> None:
+        while True:
+            try:
+                fn = self._ui_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _ensure_ui_poller(self) -> None:
+        if self._ui_polling:
+            return
+        self._ui_polling = True
+        self.after(30, self._ui_poll_tick)
+
+    def _ui_poll_tick(self) -> None:
+        try:
+            self._drain_ui_queue()
+        except Exception:
+            pass
+        if self._parsing or not self._ui_q.empty():
+            self.after(40, self._ui_poll_tick)
+        else:
+            self._ui_polling = False
 
     # ── Styles ────────────────────────────────────────────────
     def _setup_style(self) -> None:
@@ -498,20 +552,35 @@ class App(tk.Tk):
     def _refresh_status(self) -> None:
         try:
             d = self.dict_store.load_dictionary()
-            self.log_msg(f"数据字典: {len(d.relations)} 张表 | 结果 {self.result_store.count()} 行 | WAL {len(self.wal_paths)}", "dim")
+            nrel = len(d.relations) if d.relations else 0
         except Exception as e:
-            self.log_msg(f"状态: {e}", "err")
+            nrel = 0
+            self.log_msg(f"字典加载失败: {e}", "err")
+        self.log_msg(
+            f"新会话已就绪（上次解析结果已清空）| 数据字典: {nrel} 张表 | WAL 0 | 结果 0",
+            "dim",
+        )
         self._refresh_wal_list()
         self.on_refresh_table()
         self._update_stats()
+        self._set_status("就绪 — 请添加 WAL 后解析", "info")
 
     def _refresh_wal_list(self) -> None:
         self.wal_list.delete(0, tk.END)
+        self.wal_paths = []
+        stale: list[str] = []
         for p in self.result_store.list_wal_files():
-            name = Path(p).name
-            self.wal_list.insert(tk.END, name)
-            if Path(p) not in self.wal_paths:
-                self.wal_paths.append(Path(p))
+            path = Path(p)
+            if not path.exists():
+                stale.append(p)
+                continue
+            self.wal_list.insert(tk.END, path.name)
+            self.wal_paths.append(path)
+        for p in stale:
+            try:
+                self.result_store.remove_wal_file(p)
+            except Exception:
+                pass
         self.wal_count.configure(text=str(len(self.wal_paths)))
 
     # ── Actions ───────────────────────────────────────────────
@@ -560,35 +629,58 @@ class App(tk.Tk):
     def on_build_dict(self) -> None:
         dsn_win = tk.Toplevel(self)
         dsn_win.title("生成数据字典")
-        dsn_win.geometry("620x280")
         dsn_win.configure(bg=COLORS["bg_panel"])
         dsn_win.transient(self)
         dsn_win.grab_set()
+        dsn_win.minsize(640, 420)
+        dsn_win.geometry("680x460")
+
+        # center over parent after layout settles
+        def _center() -> None:
+            dsn_win.update_idletasks()
+            w = dsn_win.winfo_width()
+            h = dsn_win.winfo_height()
+            x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+            y = self.winfo_rooty() + (self.winfo_height() - h) // 2
+            dsn_win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+        dsn_win.after(10, _center)
 
         wrap = tk.Frame(dsn_win, bg=COLORS["bg_panel"])
-        wrap.pack(fill=tk.BOTH, expand=True, padx=20, pady=18)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=20, pady=(18, 12))
 
         tk.Label(wrap, text="从 PostgreSQL 生成数据字典", bg=COLORS["bg_panel"], fg=COLORS["text"], font=FONT_TITLE).pack(anchor=tk.W, pady=(0, 4))
         tk.Label(wrap, text="连接源库读取 pg_class / pg_attribute 等目录信息", bg=COLORS["bg_panel"], fg=COLORS["text_muted"], font=FONT_UI_SM).pack(anchor=tk.W, pady=(0, 12))
 
         tk.Label(wrap, text="DSN", bg=COLORS["bg_panel"], fg=COLORS["text_muted"], font=FONT_UI_SM).pack(anchor=tk.W)
-        dsn_var = tk.StringVar(value="postgresql://postgres:postgres@127.0.0.1:5432/postgres")
-        ttk.Entry(wrap, textvariable=dsn_var).pack(fill=tk.X, pady=(2, 10))
+        # password containing '@' must be percent-encoded in URI form
+        default_dsn = "postgresql://user:pass@host:port/dbname"
+        dsn_var = tk.StringVar(value=default_dsn)
+        ttk.Entry(wrap, textvariable=dsn_var).pack(fill=tk.X, pady=(2, 6))
+
+        tk.Label(
+            wrap,
+            text="示例: postgresql://user:pass@host:port/dbname   ·   密码中的 @ 请写成 %40",
+            bg=COLORS["bg_panel"],
+            fg=COLORS["text_dim"],
+            font=FONT_UI_XS,
+        ).pack(anchor=tk.W, pady=(0, 8))
 
         include_sys = tk.BooleanVar(value=False)
-        ttk.Checkbutton(wrap, text="包含系统表（pg_catalog / information_schema，一般不需要）", variable=include_sys).pack(anchor=tk.W, pady=4)
+        ttk.Checkbutton(wrap, text="包含系统表（pg_catalog / information_schema，一般不需要）", variable=include_sys).pack(anchor=tk.W, pady=(0, 8))
 
-        tk.Label(wrap, text="输出路径", bg=COLORS["bg_panel"], fg=COLORS["text_muted"], font=FONT_UI_SM).pack(anchor=tk.W, pady=(8, 0))
+        tk.Label(wrap, text="输出路径", bg=COLORS["bg_panel"], fg=COLORS["text_muted"], font=FONT_UI_SM).pack(anchor=tk.W)
         of = tk.Frame(wrap, bg=COLORS["bg_panel"])
-        of.pack(fill=tk.X, pady=2)
+        of.pack(fill=tk.X, pady=(2, 4))
         out = tk.StringVar(value=str(self.dict_path))
         ttk.Entry(of, textvariable=out).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(
-            of,
-            text="浏览",
-            style="Ghost.TButton",
-            command=lambda: out.set(filedialog.asksaveasfilename(defaultextension=".sqlite", filetypes=[("SQLite", "*.sqlite")])),
-        ).pack(side=tk.LEFT, padx=(6, 0))
+
+        def _pick_out() -> None:
+            path = filedialog.asksaveasfilename(defaultextension=".sqlite", filetypes=[("SQLite", "*.sqlite")])
+            if path:
+                out.set(path)
+
+        ttk.Button(of, text="浏览", style="Ghost.TButton", command=_pick_out).pack(side=tk.LEFT, padx=(6, 0))
 
         def run():
             try:
@@ -597,18 +689,45 @@ class App(tk.Tk):
                 store.save_dictionary(d)
                 self.dict_path = Path(out.get())
                 self.dict_store = DictStore(self.dict_path)
-                self.after(0, lambda: self.log_msg(f"数据字典已生成: {len(d.relations)} 张表", "ok"))
-                self.after(0, lambda: messagebox.showinfo("完成", f"已生成 {len(d.relations)} 张表的数据字典", parent=dsn_win))
             except Exception as e:
-                self.after(0, lambda: self.log_msg(f"字典生成失败: {e}", "err"))
-                self.after(0, lambda: messagebox.showerror("失败", str(e), parent=dsn_win))
-            finally:
-                self.after(0, dsn_win.destroy)
+                err = str(e)
 
-        btns = tk.Frame(wrap, bg=COLORS["bg_panel"])
-        btns.pack(fill=tk.X, pady=(16, 0))
-        ttk.Button(btns, text="取消", style="Ghost.TButton", command=dsn_win.destroy).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btns, text="生成字典", style="Primary.TButton", command=lambda: threading.Thread(target=run, daemon=True).start()).pack(side=tk.RIGHT)
+                def show_fail():
+                    self.log_msg(f"字典生成失败: {err}", "err")
+                    messagebox.showerror("失败", err, parent=dsn_win)
+
+                self._post_ui(show_fail)
+            else:
+                nrel = len(d.relations)
+
+                def show_ok():
+                    self.log_msg(f"数据字典已生成: {nrel} 张表", "ok")
+                    messagebox.showinfo("完成", f"已生成 {nrel} 张表的数据字典", parent=dsn_win)
+
+                self._post_ui(show_ok)
+            finally:
+                def close_win():
+                    try:
+                        dsn_win.destroy()
+                    except Exception:
+                        pass
+
+                self._post_ui(close_win)
+
+        self._ensure_ui_poller()
+
+        # bottom bar stays visible even if content grows
+        bar = tk.Frame(dsn_win, bg=COLORS["border_soft"], height=1)
+        bar.pack(fill=tk.X, side=tk.BOTTOM)
+        btns = tk.Frame(dsn_win, bg=COLORS["bg_panel"])
+        btns.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=14)
+        ttk.Button(btns, text="取消", style="Ghost.TButton", command=dsn_win.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(
+            btns,
+            text="生成字典",
+            style="Primary.TButton",
+            command=lambda: threading.Thread(target=run, daemon=True).start(),
+        ).pack(side=tk.RIGHT)
 
     def on_import_dict(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("JSON", "*.json"), ("SQLite", "*.sqlite")])
@@ -645,6 +764,11 @@ class App(tk.Tk):
         if not self.wal_paths:
             messagebox.showwarning("提示", "请先添加 WAL 文件或目录")
             return
+        # drop missing paths so rename/refresh won't abort parse
+        self.wal_paths = [p for p in self.wal_paths if Path(p).exists()]
+        if not self.wal_paths:
+            messagebox.showwarning("提示", "WAL 路径均不存在，请重新添加 testpg 目录")
+            return
         try:
             d = self.dict_store.load_dictionary()
             if not d.relations:
@@ -659,32 +783,56 @@ class App(tk.Tk):
 
         engine = WalParseEngine(d, result_store=self.result_store)
         options = ParseOptions(only_committed=True, skip_catalog=True)
+        try:
+            self.log.delete("1.0", tk.END)
+        except Exception:
+            pass
         self._set_busy(True)
-        self.log.log_delete("1.0", tk.END)
         self.log_msg("开始解析 …", "info")
+        self._ensure_ui_poller()
+
+        wal_paths = list(self.wal_paths)
 
         def run():
             try:
                 report = engine.parse_paths(
-                    self.wal_paths,
+                    wal_paths,
                     options,
-                    progress=lambda m: self.after(0, lambda: self.log_msg(m)),
+                    progress=lambda m: self._post_ui(lambda msg=m: self.log_msg(msg)),
                 )
+
                 def done():
                     self._set_busy(False)
-                    self.log_msg(json.dumps({k: report[k] for k in report if k != "schema_report"}, ensure_ascii=False), "ok")
+                    summary = {
+                        k: report[k] for k in report if k != "schema_report"
+                    }
+                    self.log_msg(
+                        f"解析成功 · 结果 {report['result_count']} 条 · "
+                        + json.dumps(summary, ensure_ascii=False),
+                        "ok",
+                    )
                     self.on_refresh_table()
                     self._update_stats()
-                    messagebox.showinfo("解析完成", f"结果行数: {report['result_count']}")
-                self.after(0, done)
+                    self._set_status(f"解析成功 · {report['result_count']} 条", "ok")
+
+                self._post_ui(done)
             except Exception as e:
+                err = str(e)
+
                 def fail():
                     self._set_busy(False)
-                    self.log_msg(f"解析失败: {e}", "err")
-                    messagebox.showerror("解析失败", str(e))
-                self.after(0, fail)
+                    self.log_msg(f"解析失败: {err}", "err")
+                    messagebox.showerror("解析失败", err)
 
-        threading.Thread(target=run, daemon=True).start()
+                self._post_ui(fail)
+
+        try:
+            threading.Thread(target=run, daemon=True).start()
+        except Exception as e:
+            err = str(e)
+            self._set_busy(False)
+            self.log_msg(f"启动解析线程失败: {err}", "err")
+            messagebox.showerror("解析失败", err)
 
     def on_refresh_table(self) -> None:
         for i in self.tree.get_children():

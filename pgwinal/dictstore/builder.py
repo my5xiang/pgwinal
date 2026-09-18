@@ -22,7 +22,10 @@ def build_dictionary_from_postgres(
             use_psycopg3 = False
         except ImportError as e:
             raise RuntimeError(
-                "未安装数据库驱动。请安装: pip install psycopg2-binary 或 pip install psycopg[binary]"
+                "未安装数据库驱动。请在运行本程序的 Python 环境中安装：\n"
+                "  py -m pip install psycopg[binary]\n"
+                "  或 py -m pip install psycopg2-binary\n"
+                "当前解释器: " + __import__("sys").executable
             ) from e
 
     from .schema import AttributeDef, DataDictionary, RelationDef
@@ -62,16 +65,36 @@ def build_dictionary_from_postgres(
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW server_version")
-            d.pg_version = cur.fetchone()[0]
-            try:
-                cur.execute("SHOW system_identifier")
-                d.system_id = str(cur.fetchone()[0])
-            except Exception:
-                d.system_id = ""
 
-            cur.execute(sql_rel)
-            for row in cur.fetchall():
+            def _safe_exec(sql: str, params=None):
+                """Run SQL; on failure rollback so later statements are not aborted."""
+                try:
+                    if params is not None:
+                        cur.execute(sql, params)
+                    else:
+                        cur.execute(sql)
+                    return True
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    return False
+
+            if _safe_exec("SHOW server_version"):
+                d.pg_version = str(cur.fetchone()[0])
+
+            d.system_id = ""
+            if _safe_exec("SHOW system_identifier"):
+                d.system_id = str(cur.fetchone()[0])
+            elif _safe_exec("SELECT system_identifier FROM pg_control_system()"):
+                d.system_id = str(cur.fetchone()[0])
+
+            # single snapshot of relations, then attributes per relation
+            if not _safe_exec(sql_rel):
+                raise RuntimeError("读取 pg_class/pg_namespace 失败")
+            rel_rows = cur.fetchall()
+            for row in rel_rows:
                 rel_oid, nsp, name, relfn, relts, relkind, _db, db_oid = row
                 if limit_relfilenode is not None and relfn not in limit_relfilenode:
                     continue
@@ -84,7 +107,8 @@ def build_dictionary_from_postgres(
                     db_oid=db_oid,
                     relkind=relkind,
                 )
-                cur.execute(sql_attr, (rel_oid,))
+                if not _safe_exec(sql_attr, (rel_oid,)):
+                    continue
                 for a in cur.fetchall():
                     rel.attributes.append(
                         AttributeDef(
