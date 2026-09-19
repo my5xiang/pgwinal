@@ -274,7 +274,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1280, 760)
         self.setStyleSheet(QSS)
 
-        self.dict_path = BASE_DIR / "dict" / "pgwal_dict.sqlite"
+        self.dict_path = None  # 不设默认——用户必须手动选择
         self.result_path = BASE_DIR / "result" / "pgwal_results.sqlite"
         self.wal_paths: list[Path] = []
         self.worker = None
@@ -285,26 +285,8 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_body()
         self._build_statusbar()
-        self._log("新会话已就绪 | 双击结果行可查看 DO/UNDO 详情", "dim")
-        self._auto_load_dict()
-
-    def _auto_load_dict(self):
-        """启动时自动加载字典：默认路径 → dict/ 下最新的 sqlite。"""
-        default = BASE_DIR / "dict" / "pgwal_dict.sqlite"
-        candidates = []
-        if default.exists():
-            candidates.append(default)
-        dict_dir = BASE_DIR / "dict"
-        if dict_dir.is_dir():
-            candidates += sorted(
-                (p for p in dict_dir.glob("*.sqlite") if p != default),
-                key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            self.dict_path = candidates[0]
-            d = self._load_dict_info()
-            if d is not None:
-                self._log(f"已自动加载字典: {candidates[0].name}（{d.relation_count} 表）", "ok")
-                self._update_stats()
+        self._log("新会话已就绪 | 请先选择数据字典与 WAL 文件", "dim")
+        # 不自动加载字典——用户手动选择（避免拿错字典）
 
     # ── 顶栏 ──────────────────────────────────────────────────
     def _build_toolbar(self):
@@ -645,6 +627,11 @@ class MainWindow(QMainWindow):
 
     # ── 字典 ──────────────────────────────────────────────────
     def _load_dict_info(self):
+        if not self.dict_path:
+            self.dict_pill.setText("字典: —（未选择）")
+            self.dict_path_label.setText("请点击「切换字典」选择")
+            self.dict_meta_label.setText("—")
+            return None
         try:
             from ..dictstore import DataDictionary
             d = DataDictionary.load_sqlite(self.dict_path)
@@ -684,10 +671,14 @@ class MainWindow(QMainWindow):
         self._log(f"数据字典已生成并切换: {self.dict_path.name}", "ok")
 
     def on_switch_dict(self):
-        init = str(BASE_DIR / "dict")
+        # 不设默认目录——用户从任意位置选择
+        init = ""
+        if self.dict_path and Path(self.dict_path).parent.is_dir():
+            init = str(Path(self.dict_path).parent)
+        elif (BASE_DIR / "dict").is_dir():
+            init = str(BASE_DIR / "dict")
         f, _ = QFileDialog.getOpenFileName(
-            self, "选择数据字典（SQLite）",
-            init if Path(init).is_dir() else str(Path(self.dict_path).parent),
+            self, "选择数据字典（SQLite）", init,
             "SQLite 字典 (*.sqlite);;All (*.*)")
         if not f:
             return
@@ -695,11 +686,11 @@ class MainWindow(QMainWindow):
         d = self._load_dict_info()
         self._update_stats()
         if d:
-            self._log(f"已切换字典 → {self.dict_path.name} · {d.relation_count} 表", "ok")
+            self._log(f"已选择字典 → {self.dict_path.name} · {d.relation_count} 表", "ok")
 
     def on_import_dict(self):
         f, _ = QFileDialog.getOpenFileName(
-            self, "导入字典", str(BASE_DIR / "dict"), "JSON (*.json);;SQLite (*.sqlite)")
+            self, "导入字典", "", "JSON (*.json);;SQLite (*.sqlite)")
         if not f:
             return
         if f.endswith(".json"):
@@ -762,8 +753,14 @@ class MainWindow(QMainWindow):
     def on_parse(self):
         if self.worker and self.worker.isRunning():
             return
+        # 字典必须已手动选择
+        if not self.dict_path or not Path(self.dict_path).exists():
+            QMessageBox.warning(self, "请选择字典",
+                                "尚未选择数据字典。\n请点击「切换字典」选择一个字典 sqlite 文件。")
+            return
         if not self.wal_paths:
-            QMessageBox.warning(self, "提示", "请先添加 WAL 文件或目录")
+            QMessageBox.warning(self, "请添加 WAL 文件",
+                                "尚未添加 WAL 文件。\n请点击「添加文件」或「添加目录」选择 WAL 段。")
             return
         self.wal_paths = [p for p in self.wal_paths if p.exists()]
         if not self.wal_paths:
@@ -898,11 +895,16 @@ class MainWindow(QMainWindow):
 
     def _update_stats(self):
         nwal = len(self.wal_paths)
-        try:
-            from ..dictstore import DataDictionary
-            nrel = DataDictionary.load_sqlite(self.dict_path).relation_count
-        except Exception:
-            nrel = 0
+        nrel = 0
+        dict_name = "—"
+        if self.dict_path and Path(self.dict_path).exists():
+            try:
+                from ..dictstore import DataDictionary
+                d = DataDictionary.load_sqlite(self.dict_path)
+                nrel = d.relation_count
+                dict_name = Path(self.dict_path).name
+            except Exception:
+                pass
         nres = 0
         if Path(self.result_path).exists():
             try:
@@ -913,7 +915,7 @@ class MainWindow(QMainWindow):
                 pass
         self.stat_label.setText(f"字典 {nrel} 表 · WAL {nwal} · 结果 {nres}")
         self.status_right.setText(
-            f"字典={Path(self.dict_path).name}  表={nrel}  wal={nwal}  rows={nres}")
+            f"字典={dict_name}  表={nrel}  wal={nwal}  rows={nres}")
 
     # ── 导出 ──────────────────────────────────────────────────
     def on_export_sql(self, mode):
