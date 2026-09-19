@@ -131,37 +131,129 @@ class HeapDecoder:
         return seeded
 
     def on_record(self, rec) -> set:
-        """记录级页像处理：FPI 播种 + CLEAN 应用。返回播种集合。"""
+        """记录级页像处理：FPI 播种 + prune/vacuum 应用（分版本）。返回播种集合。"""
         seeded = self._seed_images(rec)
         if rec.rmid == P.RM_HEAP2_ID:
             op = rec.info & P.XLOG_HEAP_OPMASK
-            if op == self.profile.heap2.get("CLEAN", -1):
-                blk = rec.block(0)
-                if blk is None or 0 in seeded:
-                    return seeded
-                key = (blk.rlocator[1], blk.rlocator[2], blk.blkno)
-                page = self.pages.get(key)
-                if page is None:
-                    self.stats["prune_skipped"] += 1
-                    return seeded
-                md = rec.main_data
-                if len(md) < 8:
-                    return seeded
-                nredirected, ndead = struct.unpack_from("<HH", md, 4)
-                data = blk.data or b""
-                # redirected：每项 2 个 OffsetNumber（from,to）= 4 字节
-                pos = nredirected * 4
-                redirected = list(struct.unpack_from(
-                    f"<{nredirected * 2}H", data, 0)) if pos <= len(data) else []
-                nowdead = list(struct.unpack_from(
-                    f"<{ndead}H", data, pos)) if ndead and pos + ndead * 2 <= len(data) else []
-                pos += ndead * 2
-                nunused = max(0, (len(data) - pos) // 2)
-                nowunused = list(struct.unpack_from(
-                    f"<{nunused}H", data, pos)) if nunused else []
-                page_apply_prune(page, redirected, nowdead, nowunused)
-                self.stats["prune_applied"] += 1
+            h2 = self.profile.heap2
+            if op in (h2.get("CLEAN", -1), h2.get("PRUNE", -1)):
+                # PG12–13 CLEAN 与 PG14–16 PRUNE 同构：
+                # main = latestRemovedXid u32 + nredirected u16 + ndead u16
+                self._apply_clean12(rec, seeded)
+            elif op == h2.get("VACUUM", -1):
+                # PG14–16 VACUUM：main = nunused u16；block data = unused 偏移
+                self._apply_vacuum14(rec, seeded)
+            elif op in (h2.get("PRUNE_ON_ACCESS", -1), h2.get("PRUNE_VACUUM_SCAN", -1),
+                        h2.get("PRUNE_VACUUM_CLEANUP", -1)):
+                # PG17–18 新格式 prune
+                self._apply_prune17(rec, seeded)
         return seeded
+
+    def _prune_page(self, rec):
+        """取该记录目标页的页像（在库时）。"""
+        blk = rec.block(0)
+        if blk is None:
+            return None, None
+        key = (blk.rlocator[1], blk.rlocator[2], blk.blkno)
+        page = self.pages.get(key)
+        if page is None:
+            self.stats["prune_skipped"] += 1
+        return page, blk
+
+    def _apply_clean12(self, rec, seeded):
+        """PG12–16：CLEAN/PRUNE（latestRemovedXid + nredirected + ndead）。"""
+        page, blk = self._prune_page(rec)
+        if page is None or 0 in seeded:
+            return
+        md = rec.main_data
+        if len(md) < 8:
+            return
+        nredirected, ndead = struct.unpack_from("<HH", md, 4)
+        data = blk.data or b""
+        # redirected：每项 2 个 OffsetNumber（from,to）= 4 字节
+        pos = nredirected * 4
+        redirected = list(struct.unpack_from(
+            f"<{nredirected * 2}H", data, 0)) if pos <= len(data) else []
+        nowdead = list(struct.unpack_from(
+            f"<{ndead}H", data, pos)) if ndead and pos + ndead * 2 <= len(data) else []
+        pos += ndead * 2
+        nunused = max(0, (len(data) - pos) // 2)
+        nowunused = list(struct.unpack_from(
+            f"<{nunused}H", data, pos)) if nunused else []
+        page_apply_prune(page, redirected, nowdead, nowunused)
+        self.stats["prune_applied"] += 1
+
+    def _apply_vacuum14(self, rec, seeded):
+        """PG14–16：VACUUM（nunused u16；block data = unused 偏移）。"""
+        page, blk = self._prune_page(rec)
+        if page is None or 0 in seeded:
+            return
+        md = rec.main_data
+        if len(md) < 2:
+            return
+        nunused = struct.unpack_from("<H", md, 0)[0]
+        data = blk.data or b""
+        nowunused = list(struct.unpack_from(
+            f"<{min(nunused, len(data) // 2)}H", data, 0)) if data else []
+        page_apply_prune(page, [], [], nowunused)
+        self.stats["prune_applied"] += 1
+
+    def _apply_prune17(self, rec, seeded):
+        """PG17–18：新格式 prune。
+
+        main = reason u8 + flags u8 [+ conflict horizon u32（XLHP_HAS_CONFLICT_HORIZON，非对齐）]
+        block data 按 flags 顺序的子记录：
+          HAS_FREEZE_PLANS: nplans u16 + 2B pad + nplans×11B
+          HAS_REDIRECTIONS: nredirected u16 + 2n 偏移
+          HAS_DEAD_ITEMS:   ndead u16 + n 偏移
+          HAS_NOW_UNUSED:   nunused u16 + n 偏移
+          （frz_offsets 在末尾，重放不需要）
+        """
+        page, blk = self._prune_page(rec)
+        if page is None or 0 in seeded:
+            return
+        md = rec.main_data
+        if len(md) < 2:
+            return
+        flags = md[1]
+        pos = 2
+        if flags & 0x08:  # XLHP_HAS_CONFLICT_HORIZON（非对齐 u32）
+            pos += 4
+        data = blk.data or b""
+        dpos = 0
+
+        def take_u16():
+            nonlocal dpos
+            if dpos + 2 > len(data):
+                return 0
+            v = struct.unpack_from("<H", data, dpos)[0]
+            dpos += 2
+            return v
+
+        redirected: list = []
+        nowdead: list = []
+        nowunused: list = []
+        if flags & 0x10:  # HAS_FREEZE_PLANS
+            nplans = take_u16()
+            dpos += 2  # pad
+            dpos += nplans * 11
+        if flags & 0x20:  # HAS_REDIRECTIONS
+            n = take_u16()
+            if dpos + 2 * n <= len(data):
+                redirected = list(struct.unpack_from(f"<{2 * n}H", data, dpos))
+            dpos += 2 * n
+        if flags & 0x40:  # HAS_DEAD_ITEMS
+            n = take_u16()
+            if dpos + 2 * n <= len(data):
+                nowdead = list(struct.unpack_from(f"<{n}H", data, dpos))
+            dpos += 2 * n
+        if flags & 0x80:  # HAS_NOW_UNUSED_ITEMS
+            n = take_u16()
+            if dpos + 2 * n <= len(data):
+                nowunused = list(struct.unpack_from(f"<{n}H", data, dpos))
+            dpos += 2 * n
+        page_apply_prune(page, redirected, nowdead, nowunused)
+        self.stats["prune_applied"] += 1
 
     def _redo_tuple(self, rec, blk, offnum: int, tuple_bytes: bytes):
         """把新元组 redo 进页库（页已在库时）。"""

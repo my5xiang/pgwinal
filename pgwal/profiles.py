@@ -15,13 +15,20 @@ from dataclasses import dataclass, field
 
 BLCKSZ = 8192
 XLOG_BLCKSZ = 8192
-XLOG_PAGE_MAGIC = 0xD101
 SIZEOF_XLOG_RECORD = 24          # offsetof(xl_crc)+4
 SIZEOF_XLOG_SHORT_PHD = 24       # MAXALIGN(20)
 SIZEOF_XLOG_LONG_PHD = 40        # MAXALIGN(36)
 SIZEOF_HEAP_HEADER = 5           # xl_heap_header: infomask2/infomask/hoff
 SIZEOF_HEAP_TUPLE_HEADER = 23   # HeapTupleHeaderData 固定部分
 DEFAULT_WAL_SEG_SIZE = 16 * 1024 * 1024
+
+# WAL 页 magic（各版本不同！来源：REL_12~18_STABLE xlog_internal.h）
+XLOG_PAGE_MAGIC_BY_VERSION = {
+    12: 0xD101, 13: 0xD106, 14: 0xD10D, 15: 0xD110,
+    16: 0xD113, 17: 0xD116, 18: 0xD118,
+}
+# 兼容旧引用（PG12）
+XLOG_PAGE_MAGIC = 0xD101
 
 XLP_FIRST_IS_CONTRECORD = 0x0001
 XLP_LONG_HEADER = 0x0002
@@ -166,6 +173,11 @@ class VersionProfile:
     has_toplevel_xid_block: bool = False
     # FPI 压缩：PG15 起有方法位（pglz/lz4/zstd）；12–14 为单一 IS_COMPRESSED 位（仅 pglz）
     fpi_compression_methods: bool = False
+
+    @property
+    def page_magic(self) -> int:
+        """WAL 页 magic（各版本不同）。"""
+        return XLOG_PAGE_MAGIC_BY_VERSION.get(self.major, XLOG_PAGE_MAGIC)
 
     def image_is_compressed(self, bimg_info: int) -> bool:
         if self.fpi_compression_methods:

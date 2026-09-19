@@ -69,6 +69,9 @@ class Engine:
             n += 1
             if max_records and n > max_records:
                 break
+            # PG13+：记录内 TOPLEVEL_XID 块直接建立 sub→top 映射
+            if rec.toplevel_xid and rec.xid != rec.toplevel_xid:
+                sub2top[rec.xid] = rec.toplevel_xid
             if rec.rmid == P.RM_XACT_ID:
                 op = rec.info & P.XLOG_XACT_OPMASK
                 if op in (P.XLOG_XACT_COMMIT, P.XLOG_XACT_COMMIT_PREPARED):
@@ -90,7 +93,10 @@ class Engine:
         n = 0
         emitted = 0
 
-        def toplevel(xid: int) -> int:
+        def toplevel(xid: int, rec=None) -> int:
+            # PG13+：记录内 TOPLEVEL_XID 块优先；PG12：XACT_ASSIGNMENT 映射
+            if rec is not None and getattr(rec, "toplevel_xid", 0):
+                return rec.toplevel_xid
             return sub2top.get(xid, xid)
 
         def flush(top: int, ts):
@@ -136,7 +142,7 @@ class Engine:
 
             if rec.xid == 0:
                 continue
-            top = toplevel(rec.xid)
+            top = toplevel(rec.xid, rec)
             if self.only_committed:
                 if top in aborts or rec.xid in aborts:
                     decoder.redo_physical(rec, seeded)

@@ -24,4 +24,8 @@ pg.log
 .idea/
 .vscode/
 Thumbs.db
-.DS_Store
+.DS_Storepgv*/
+pgv*_data/
+pgv*.log
+vm_*
+pgv*.zip

@@ -68,6 +68,7 @@ class Record:
     blocks: list = field(default_factory=list)
     main_data: bytes = b""
     origin_id: int = 0
+    toplevel_xid: int = 0  # PG13+ 的 XLR_BLOCK_ID_TOPLEVEL_XID 块值（子事务→顶层）
 
     def block(self, block_id: int) -> Optional[BlockRef]:
         for b in self.blocks:
@@ -93,6 +94,7 @@ def decode_record_body(body: bytes, profile: P.VersionProfile) -> tuple:
     blocks_by_id: dict[int, BlockRef] = {}
     main_len = 0
     origin_id = 0
+    toplevel_xid = 0
     ptr = 0
     remaining = len(body)
     datatotal = 0
@@ -133,6 +135,7 @@ def decode_record_body(body: bytes, profile: P.VersionProfile) -> tuple:
                 raise WalError("unexpected XLR_BLOCK_ID_TOPLEVEL_XID in PG12 record")
             if remaining < 4:
                 raise WalError("record with invalid length (toplevel xid)")
+            toplevel_xid = _U32.unpack_from(body, ptr)[0]
             ptr += 4
             remaining -= 4
         elif block_id <= P.XLR_MAX_BLOCK_ID:
@@ -226,7 +229,7 @@ def decode_record_body(body: bytes, profile: P.VersionProfile) -> tuple:
     if len(main_data) != main_len:
         raise WalError("record with invalid length (main payload)")
 
-    return list(blocks_by_id.values()), main_data, origin_id
+    return list(blocks_by_id.values()), main_data, origin_id, toplevel_xid
 
 
 def restore_block_image(blk: BlockRef) -> bytes:
@@ -322,7 +325,7 @@ class WalStream:
                         self._note(f"{path.name}: 零页 @page {page_idx}（已写 WAL 的终点）")
                         stop_all = True
                         break
-                    if magic != P.XLOG_PAGE_MAGIC:
+                    if magic != self.profile.page_magic:
                         raise WalError(
                             f"{path.name} page {page_idx}: 非法 magic {magic:04X} @lsn {pageaddr:016X}")
                     if info & ~P.XLP_ALL_FLAGS:
@@ -494,7 +497,7 @@ class WalStream:
 
         body = rec_bytes[P.SIZEOF_XLOG_RECORD:tot_len]
         try:
-            blocks, main_data, origin_id = decode_record_body(body, self.profile)
+            blocks, main_data, origin_id, toplevel_xid = decode_record_body(body, self.profile)
         except WalError as e:
             raise WalError(f"{e} @lsn {start_lsn:016X}") from None
 
@@ -510,6 +513,7 @@ class WalStream:
             blocks=blocks,
             main_data=main_data,
             origin_id=origin_id,
+            toplevel_xid=toplevel_xid,
         )
 
     def _finish(self, pending: _Pending, prev_start) -> Record:
