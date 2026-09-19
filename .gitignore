@@ -7,7 +7,7 @@ venv/
 .pytest_cache/
 .mypy_cache/
 
-# ?????WAL ? / ?? / ???? / ??????? ?? git
+# Data files (WAL / dict / results / test instances) - not tracked
 testpg/
 dict/
 result/
@@ -20,12 +20,15 @@ pg.log
 *.sql
 *.xlsx
 
-# ??? / ??
+# PG version test instances
+pgv*/
+pgv*_data/
+pgv*.log
+pgv*.zip
+vm_*
+
+# Editor / OS
 .idea/
 .vscode/
 Thumbs.db
-.DS_Storepgv*/
-pgv*_data/
-pgv*.log
-vm_*
-pgv*.zip
+.DS_Store
