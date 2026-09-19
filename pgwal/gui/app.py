@@ -217,7 +217,8 @@ class BuildDictDialog(QDialog):
         lay.addWidget(sub)
 
         lay.addWidget(QLabel("DSN"))
-        self.dsn = QLineEdit("postgresql://user:pass@host:port/dbname")
+        self.dsn = QLineEdit("")
+        self.dsn.setPlaceholderText("postgresql://user:pass@host:port/dbname")
         lay.addWidget(self.dsn)
         tip = QLabel("示例: postgresql://user:pass@host:port/dbname · 密码中的 @ 请写成 %40")
         tip.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 8pt;")
