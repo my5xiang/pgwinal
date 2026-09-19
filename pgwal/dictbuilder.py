@@ -77,20 +77,31 @@ CREATE INDEX idx_att_rel ON attributes(rel_oid);
     s.executemany(
         "INSERT INTO attributes VALUES (?,?,?,?,?,?,?,?,?,?)", attrs)
 
-    # 主键信息（供 UNDO WHERE 优化）
+    # 主键信息（DELETE/UPDATE 精简化的前提，务必采集）
+    # conkey 即 attnum 数组；unnest 后按序聚合成 "1,3" 形式存入 relations.pk_attnums
     cur.execute("""
-        SELECT con.conrelid, array_agg(a.attnum ORDER BY a.attnum)
+        SELECT con.conrelid, array_agg(x ORDER BY x)
         FROM pg_constraint con
-        JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
-        JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+        CROSS JOIN LATERAL unnest(con.conkey) AS x
         WHERE con.contype = 'p'
+          AND con.conrelid <> 0
         GROUP BY con.conrelid
     """)
-    for rel_oid, attnums in cur.fetchall():
-        s.execute("UPDATE relations SET pk_attnums=? WHERE rel_oid=?",
-                  (",".join(str(x) for x in attnums), rel_oid))
+    pk_rows = cur.fetchall()
+    s.executemany(
+        "UPDATE relations SET pk_attnums=? WHERE rel_oid=?",
+        [( ",".join(str(x) for x in attnums), rel_oid) for rel_oid, attnums in pk_rows])
+
+    # 校验：主键必须落在已采集的关系上（防静默丢失）
+    matched = s.execute(
+        "SELECT COUNT(*) FROM relations WHERE pk_attnums IS NOT NULL AND pk_attnums != ''"
+    ).fetchone()[0]
+    if matched < len(pk_rows):
+        missing = len(pk_rows) - matched
+        print(f"警告: {missing} 个主键约束未匹配到已采集的关系（可能属于非 r/t/p 类型）")
 
     s.commit()
     s.close()
     conn.close()
-    print(f"字典已生成: {out}（{len(rels)} 关系 / {len(attrs)} 属性 / PG {pg_version}）")
+    print(f"字典已生成: {out}（{len(rels)} 关系 / {len(attrs)} 属性 / "
+          f"主键 {matched} 表 / PG {pg_version}）")
