@@ -286,6 +286,25 @@ class MainWindow(QMainWindow):
         self._build_body()
         self._build_statusbar()
         self._log("新会话已就绪 | 双击结果行可查看 DO/UNDO 详情", "dim")
+        self._auto_load_dict()
+
+    def _auto_load_dict(self):
+        """启动时自动加载字典：默认路径 → dict/ 下最新的 sqlite。"""
+        default = BASE_DIR / "dict" / "pgwal_dict.sqlite"
+        candidates = []
+        if default.exists():
+            candidates.append(default)
+        dict_dir = BASE_DIR / "dict"
+        if dict_dir.is_dir():
+            candidates += sorted(
+                (p for p in dict_dir.glob("*.sqlite") if p != default),
+                key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            self.dict_path = candidates[0]
+            d = self._load_dict_info()
+            if d is not None:
+                self._log(f"已自动加载字典: {candidates[0].name}（{d.relation_count} 表）", "ok")
+                self._update_stats()
 
     # ── 顶栏 ──────────────────────────────────────────────────
     def _build_toolbar(self):
@@ -639,6 +658,14 @@ class MainWindow(QMainWindow):
             if d.meta.get("created_at"):
                 meta += f"\n创建: {d.meta['created_at']}"
             self.dict_meta_label.setText(meta)
+            # 主键覆盖提示（决定 DELETE/UPDATE 是否精简）
+            n_pk = sum(1 for r in d._by_filenode.values() if r.pk_attnums)
+            if n_pk == 0:
+                self._log("警告: 该字典无主键信息——DELETE/UNDO 将使用全字段匹配（冗长）。"
+                          "建议用「生成字典」重新生成（自动采集主键）", "warn")
+            else:
+                meta += f"\n主键: {n_pk} 表（DELETE 按主键 / UPDATE 仅变更列）"
+                self.dict_meta_label.setText(meta)
             return d
         except Exception:
             self.dict_pill.setText("字典: —（未加载）")

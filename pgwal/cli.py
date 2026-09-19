@@ -24,6 +24,14 @@ def cmd_parse(args) -> int:
           f"关系={d.relation_count}  system_id={d.system_id}")
     if d.major not in range(12, 19):
         print(f"警告: 字典 PG 版本 {d.pg_version} 不在 12–18 支持范围")
+    # 主键覆盖率（决定 DELETE/UPDATE 是否精简）
+    n_pk = sum(1 for r in d._by_filenode.values() if r.pk_attnums)
+    if n_pk == 0:
+        print("警告: 字典无主键信息——DELETE/INSERT-UNDO 将使用全字段匹配（冗长）。"
+              "建议用「生成字典」重新生成（自动采集主键），或使用含主键的字典。")
+    else:
+        print(f"主键覆盖: {n_pk}/{d.relation_count} 张表"
+              f"（DELETE 按主键定位，UPDATE 仅变更列）")
 
     result = ResultStore(args.out)
     eng = Engine(d, result, only_committed=not args.all_tx,
