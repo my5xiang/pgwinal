@@ -7,13 +7,20 @@ venv/
 .pytest_cache/
 .mypy_cache/
 
-# 本地生成数据 / 解析产物
+# ?????WAL ? / ?? / ???? / ??????? ?? git
+testpg/
+dict/
 result/
-dict/*.sqlite
-tests/out_*
+pg12/
+pgdata/
+reference/
+pg12.zip
+pg.log
+*.sqlite
+*.sql
 *.xlsx
 
-# 编辑器 / 系统
+# ??? / ??
 .idea/
 .vscode/
 Thumbs.db

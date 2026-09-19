@@ -1,25 +1,9 @@
-from __future__ import annotations
-
+"""pgwalnew GUI 启动入口。"""
 import sys
+from pathlib import Path
 
-
-def main() -> None:
-    # Sharper UI on Windows high-DPI displays
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            try:
-                ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
-
-    from pgwinal.gui.app import main as gui_main
-
-    gui_main()
-
+sys.path.insert(0, str(Path(__file__).parent))
+from pgwalnew.gui.app import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

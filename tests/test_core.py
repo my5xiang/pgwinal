@@ -1,156 +1,132 @@
+"""单元测试：crc32c / 帧扫描 / SQL 字面量 / 元组 deform。
+
+运行：python -m unittest discover tests -v
+真实数据测试（test_framing_real）在 testpg 数据存在时自动执行。
+"""
+
 from __future__ import annotations
 
 import sys
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from tests.make_sample_wal import build_sample_wal  # noqa: E402
-from pgwinal.core.xlog import WalScanner  # noqa: E402
-from pgwinal.dictstore.schema import AttributeDef, DataDictionary, DictStore, RelationDef  # noqa: E402
-from pgwinal.parse.engine import ParseOptions, WalParseEngine  # noqa: E402
-from pgwinal.resultstore.resultdb import ResultStore  # noqa: E402
-from pgwinal.reverse.sqlgen import SqlGenerator, SchemaChangeTracker, literal, quote_ident  # noqa: E402
+from pgwalnew.crc32c import crc32c, record_crc_valid  # noqa: E402
+from pgwalnew.sqlval import sql_literal  # noqa: E402
+from pgwalnew.typereg import RawValue  # noqa: E402
+from pgwalnew import profiles as P  # noqa: E402
+
+WAL_DIR = Path(r"D:\mimo\pgwinal\testpg")
+DICT = Path(r"D:\mimo\pgwinal\dict\pgwalnew_dict_aphx.sqlite")
 
 
-class TestSql(unittest.TestCase):
-    def test_literal(self):
-        self.assertEqual(literal(None), "NULL")
-        self.assertEqual(literal(1), "1")
-        self.assertEqual(literal("a'b"), "'a''b'")
-        self.assertEqual(quote_ident('a"b'), '"a""b"')
+class TestCrc32c(unittest.TestCase):
+    def test_vector(self):
+        # RFC 3720 / iSCSI 标准测试向量
+        self.assertEqual(crc32c(b"123456789"), 0xE3069283)
+        self.assertEqual(crc32c(b""), 0x00000000)
+        self.assertEqual(crc32c(b"a"), 0xC1D04330)
 
-    def test_generate_insert(self):
-        rel = RelationDef(
-            rel_oid=1,
-            schema_name="public",
-            rel_name="t1",
-            relfilenode=16400,
-            reltablespace=1663,
-            db_oid=16384,
-            attributes=[
-                AttributeDef(1, "id", 23, "int4"),
-                AttributeDef(2, "name", 25, "text"),
-            ],
-        )
-        gen = SqlGenerator(SchemaChangeTracker(DataDictionary()))
-        do, undo, notes = gen.generate("INSERT", rel, {"id": 1, "name": "hello"})
-        self.assertIn("INSERT INTO", do)
-        self.assertIn("public", do)
-        self.assertIn("DELETE FROM", undo)
-
-    def test_generate_delete_ctid_without_old_tuple(self):
-        rel = RelationDef(
-            rel_oid=40484,
-            schema_name="bdsy",
-            rel_name="sys_log",
-            relfilenode=47194,
-            reltablespace=0,
-            db_oid=32085,
-            attributes=[AttributeDef(1, "id", 1043, "varchar")],
-        )
-        gen = SqlGenerator(SchemaChangeTracker(DataDictionary(relations=[rel])))
-        do, undo, notes = gen.generate("DELETE", rel, {}, None, 0, 32085, 40484, ctid=(598, 13))
-        self.assertIn("bdsy", do)
-        self.assertIn("ctid", do)
-        self.assertIn("(598,13)", do)
-        self.assertIn("undo DELETE missing", undo)
+    def test_record_crc(self):
+        # 构造一条合法记录（自校验）
+        import struct
+        header = struct.pack("<IIQBBHI", 24, 0, 0, 0, 0, 0, 0)
+        body = b""
+        crc = crc32c(body + header[:20])
+        rec = struct.pack("<IIQBBHI", 24, 0, 0, 0, 0, 0, crc)
+        self.assertTrue(record_crc_valid(rec))
 
 
-class TestDictResolve(unittest.TestCase):
-    def test_find_relation_oid_fallback_after_rewrite(self):
-        d = DataDictionary(
-            relations=[
-                RelationDef(
-                    rel_oid=40484,
-                    schema_name="bdsy",
-                    rel_name="sys_log",
-                    relfilenode=47194,  # rewritten
-                    reltablespace=0,
-                    db_oid=32085,
-                    attributes=[],
-                )
-            ]
-        )
-        rel, how = d.find_relation(40484, 32085)
-        self.assertIsNotNone(rel)
-        self.assertEqual(how, "rel_oid")
-        self.assertEqual(rel.rel_name, "sys_log")
+class TestSqlLiteral(unittest.TestCase):
+    def test_basic(self):
+        self.assertEqual(sql_literal("it's"), "'it''s'")
+        self.assertEqual(sql_literal("a\\b"), "E'a\\\\b'")
+        self.assertEqual(sql_literal(42), "42")
+        self.assertEqual(sql_literal(None), "NULL")
+        self.assertEqual(sql_literal(True), "TRUE")
+        self.assertEqual(sql_literal(b"\x01\x02"), "'\\x0102'")
 
-        # current relfilenode still wins
-        rel2, how2 = d.find_relation(47194, 32085)
-        self.assertEqual(how2, "relfilenode")
-        self.assertEqual(rel2.rel_name, "sys_log")
+    def test_raw_not_executable(self):
+        v = sql_literal(RawValue(b"x", "测试原因", "raw"))
+        self.assertIn("不可执行", v)
 
 
-class TestScan(unittest.TestCase):
-    def test_scan_synthetic(self):
-        wal = ROOT / "tests" / "sample" / "000000010000000000000001"
-        build_sample_wal(wal)
-        scanner = WalScanner([wal])
-        recs = list(scanner.scan())
-        self.assertGreaterEqual(len(recs), 2)
-        rmids = {r.rmid for r in recs}
-        self.assertIn(10, rmids)  # Heap
-        self.assertIn(1, rmids)  # Transaction
+class TestProfiles(unittest.TestCase):
+    def test_pg12_heap2(self):
+        p = P.get_profile(12)
+        self.assertEqual(p.heap2["MULTI_INSERT"], 0x50)
+        self.assertEqual(p.heap2["CLEAN"], 0x10)
+        self.assertFalse(p.has_toplevel_xid_block)
+
+    def test_pg17_heap2(self):
+        p = P.get_profile(17)
+        self.assertEqual(p.heap2["PRUNE_ON_ACCESS"], 0x10)
+        self.assertEqual(p.heap2["MULTI_INSERT"], 0x50)
+
+    def test_bimg_flags_versioned(self):
+        p12 = P.get_profile(12)
+        p15 = P.get_profile(15)
+        # PG12: 0x02=IS_COMPRESSED；PG15: 0x04=PGLZ
+        self.assertTrue(p12.image_is_compressed(0x02))
+        self.assertFalse(p12.image_is_compressed(0x04))  # PG12 的 0x04 是 APPLY
+        self.assertTrue(p15.image_is_compressed(0x04))
+        self.assertTrue(p15.image_is_compressed(0x08))
 
 
-class TestEngine(unittest.TestCase):
-    def test_parse_end_to_end(self):
-        wal = ROOT / "tests" / "sample" / "000000010000000000000001"
-        build_sample_wal(wal)
-        dictionary = DataDictionary(
-            relations=[
-                RelationDef(
-                    rel_oid=1,
-                    schema_name="public",
-                    rel_name="t1",
-                    relfilenode=16400,
-                    reltablespace=1663,
-                    db_oid=16384,
-                    attributes=[
-                        AttributeDef(1, "id", 23, "int4"),
-                        AttributeDef(2, "name", 25, "text"),
-                    ],
-                )
-            ]
-        )
-        out = ROOT / "tests" / "out_results.sqlite"
-        if out.exists():
-            out.unlink()
-        engine = WalParseEngine(dictionary, ResultStore(out))
-        report = engine.parse_paths([wal], ParseOptions(only_committed=True, skip_catalog=True))
-        self.assertGreaterEqual(report["result_count"], 1)
-        rows = engine.results.fetch(limit=10)
-        self.assertTrue(any(r["op"] == "INSERT" for r in rows))
-        insert_row = next(r for r in rows if r["op"] == "INSERT")
-        self.assertIn("INSERT INTO", insert_row["do_sql"])
+class TestFramingReal(unittest.TestCase):
+    """真实数据帧级验证（testpg 存在时执行）。"""
+
+    def test_first_segments(self):
+        if not WAL_DIR.exists():
+            self.skipTest("testpg 数据不存在")
+        from pgwalnew.xlogreader import WalStream, collect_wal_files
+        files = collect_wal_files(WAL_DIR)[:2]
+        stream = WalStream(files, profile=P.get_profile(12),
+                           system_id=7579057487605995718)
+        n = 0
+        for rec in stream.iter_records():
+            n += 1
+            if n > 50000:
+                break
+        self.assertEqual(stream.stats["crc_ok"], n)
+        self.assertEqual(stream.stats["prev_checked"], n - 1)
 
 
-class TestDictStore(unittest.TestCase):
+class TestXlsx(unittest.TestCase):
     def test_roundtrip(self):
-        path = ROOT / "tests" / "out_dict.sqlite"
-        if path.exists():
-            path.unlink()
-        store = DictStore(path)
-        d = DataDictionary(pg_version="16.2")
-        d.relations.append(
-            RelationDef(
-                rel_oid=10,
-                schema_name="public",
-                rel_name="a",
-                relfilenode=11,
-                reltablespace=1663,
-                db_oid=16384,
-                attributes=[AttributeDef(1, "c", 23, "int4")],
-            )
-        )
-        store.save_dictionary(d)
-        d2 = store.load_dictionary()
-        self.assertEqual(len(d2.relations), 1)
-        self.assertEqual(d2.relations[0].attributes[0].attname, "c")
+        import tempfile
+        import zipfile
+        from pgwalnew.xlsx import write_xlsx
+        headers = ["id", "op", "备注"]
+        rows = [(1, "INSERT", "中文内容&<tag>"), (2, "DELETE", None),
+                (3, "UPDATE", "a" * 40000)]  # 超长截断 + 非法控制字符
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        try:
+            n = write_xlsx(path, headers, rows)
+            self.assertEqual(n, 3)
+            # 结构完整性：OOXML 必需部件
+            with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+                for part in ("[Content_Types].xml", "_rels/.rels",
+                             "xl/workbook.xml", "xl/_rels/workbook.xml.rels",
+                             "xl/worksheets/sheet1.xml"):
+                    self.assertIn(part, names)
+            # openpyxl 读取（Excel 兼容性事实标准）
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(path)
+                ws = wb.active
+                self.assertEqual([c.value for c in ws[1]], headers)
+                self.assertEqual(ws.cell(row=2, column=2).value, "INSERT")
+                self.assertEqual(ws.cell(row=2, column=3).value, "中文内容&<tag>")
+                self.assertLessEqual(len(ws.cell(row=4, column=3).value), 32767)
+            except ImportError:
+                pass
+        finally:
+            Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

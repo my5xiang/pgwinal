@@ -1,4 +1,3 @@
-# pgwinal 运行依赖（GUI 使用标准库 tkinter，无需额外安装）
-# 可选：连接 PostgreSQL 生成数据字典
-psycopg[binary]>=3.2
-psycopg2-binary>=2.9.9
+PySide6>=6.5
+crc32c>=2.3
+psycopg2-binary>=2.9 ; extra == "dict"
