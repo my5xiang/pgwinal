@@ -9,6 +9,7 @@ venv/
 
 # Data files (WAL / dict / results / test instances) - not tracked
 testpg/
+testpg1/
 dict/
 result/
 pg12/
