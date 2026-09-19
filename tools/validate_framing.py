@@ -15,8 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from pgwalnew import profiles as P  # noqa: E402
-from pgwalnew.xlogreader import WalStream, collect_wal_files  # noqa: E402
+from pgwal import profiles as P  # noqa: E402
+from pgwal.xlogreader import WalStream, collect_wal_files  # noqa: E402
 
 
 def main() -> int:
@@ -24,7 +24,7 @@ def main() -> int:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("wal_dir", nargs="?", default=r"D:\mimo\pgwinal\testpg")
-    ap.add_argument("--dict", default=r"D:\mimo\pgwinal\dict\pgwalnew_dict_aphx.sqlite")
+    ap.add_argument("--dict", default=r"D:\mimo\pgwinal\dict\pgwal_dict_aphx.sqlite")
     ap.add_argument("--max-segs", type=int, default=0)
     ap.add_argument("--rmgr-hist", action="store_true")
     args = ap.parse_args()

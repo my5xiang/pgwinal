@@ -1,6 +1,6 @@
-"""pgwalnew GUI（PySide6）—— 界面实现参考 pgwinal（MiMo 风格浅色主题）。
+"""pgwal GUI（PySide6）—— 界面实现参考 pgwinal（MiMo 风格浅色主题）。
 
-布局与交互对齐旧项目 pgwinal/pgwalnew/gui/app.py：
+布局与交互对齐旧项目 pgwinal/pgwal/gui/app.py：
   顶栏双行：品牌 + 统计 + 字典胶囊 + 主按钮「开始解析」
             添加文件/目录/清空 | 生成/切换/导入/导出字典 | 导出DO/UNDO/Excel
   左侧 300px 侧栏（卡片式）：当前字典卡片 / WAL 文件卡片 / 过滤条件卡片
@@ -269,13 +269,13 @@ class BuildDictDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("pgwalnew · PostgreSQL WAL Recovery")
+        self.setWindowTitle("pgwal · PostgreSQL WAL Recovery")
         self.resize(1440, 900)
         self.setMinimumSize(1280, 760)
         self.setStyleSheet(QSS)
 
-        self.dict_path = BASE_DIR / "dict" / "pgwalnew_dict.sqlite"
-        self.result_path = BASE_DIR / "result" / "pgwalnew_results.sqlite"
+        self.dict_path = BASE_DIR / "dict" / "pgwal_dict.sqlite"
+        self.result_path = BASE_DIR / "result" / "pgwal_results.sqlite"
         self.wal_paths: list[Path] = []
         self.worker = None
         self.dict_worker = None
@@ -305,7 +305,7 @@ class MainWindow(QMainWindow):
         r1.addWidget(logo)
         brandbox = QVBoxLayout()
         brandbox.setSpacing(0)
-        brand = QLabel("pgwalnew")
+        brand = QLabel("pgwal")
         brand.setObjectName("brand")
         sub = QLabel("WAL · DO / UNDO SQL")
         sub.setObjectName("brandSub")
@@ -715,7 +715,7 @@ class MainWindow(QMainWindow):
 
     def on_export_dict(self):
         f, _ = QFileDialog.getSaveFileName(
-            self, "导出字典", "pgwalnew_dict.json", "JSON (*.json)")
+            self, "导出字典", "pgwal_dict.json", "JSON (*.json)")
         if not f:
             return
         try:
@@ -912,7 +912,7 @@ class MainWindow(QMainWindow):
         if not Path(self.result_path).exists():
             QMessageBox.information(self, "提示", "尚无解析结果")
             return
-        f, _ = QFileDialog.getSaveFileName(self, "导出 Excel", "pgwalnew_results.xlsx",
+        f, _ = QFileDialog.getSaveFileName(self, "导出 Excel", "pgwal_results.xlsx",
                                            "Excel (*.xlsx)")
         if not f:
             return
@@ -924,7 +924,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "导出失败", str(e))
 
     def _export_xlsx(self, path) -> int:
-        """标准 OOXML xlsx 导出（pgwalnew.xlsx 模块）。"""
+        """标准 OOXML xlsx 导出（pgwal.xlsx 模块）。"""
         from ..xlsx import write_xlsx
         conn = sqlite3.connect(f"file:{Path(self.result_path).as_posix()}?mode=ro", uri=True)
 

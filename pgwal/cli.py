@@ -1,10 +1,10 @@
-"""pgwalnew 命令行入口。
+"""pgwal 命令行入口。
 
 用法：
-  python -m pgwalnew parse <wal目录或文件>... --dict <字典.sqlite> --out <结果.sqlite>
+  python -m pgwal parse <wal目录或文件>... --dict <字典.sqlite> --out <结果.sqlite>
       [--all-tx] [--max-records N] [--export-do do.sql] [--export-undo undo.sql]
-  python -m pgwalnew dict --dsn <postgresql://...> --out <字典.sqlite>
-  python -m pgwalnew gui
+  python -m pgwal dict --dsn <postgresql://...> --out <字典.sqlite>
+  python -m pgwal gui
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def cmd_gui(args) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="pgwalnew")
+    ap = argparse.ArgumentParser(prog="pgwal")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("parse", help="解析 WAL 生成 DO/UNDO SQL")

@@ -1,7 +1,7 @@
 """数据字典构建：从在线 PostgreSQL 生成（需 psycopg2，可选依赖）。
 
 生成与 aphx 字典兼容的 SQLite schema（见 dictstore.py 文档）。
-用法：python -m pgwalnew dict --dsn postgresql://user:pass@host:5432/db --out dict.sqlite
+用法：python -m pgwal dict --dsn postgresql://user:pass@host:5432/db --out dict.sqlite
 """
 
 from __future__ import annotations

@@ -111,7 +111,7 @@ class ResultStore:
         col = 3 if mode == "do" else 4
         n = 0
         with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(f"-- pgwalnew {mode.upper()} SQL\n")
+            f.write(f"-- pgwal {mode.upper()} SQL\n")
             f.write(f"-- 共 {len(rows)} 条{'（仅可执行）' if executable_only else ''}\n\n")
             cur_xid = None
             for r in rows:

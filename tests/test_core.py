@@ -13,13 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from pgwalnew.crc32c import crc32c, record_crc_valid  # noqa: E402
-from pgwalnew.sqlval import sql_literal  # noqa: E402
-from pgwalnew.typereg import RawValue  # noqa: E402
-from pgwalnew import profiles as P  # noqa: E402
+from pgwal.crc32c import crc32c, record_crc_valid  # noqa: E402
+from pgwal.sqlval import sql_literal  # noqa: E402
+from pgwal.typereg import RawValue  # noqa: E402
+from pgwal import profiles as P  # noqa: E402
 
 WAL_DIR = Path(r"D:\mimo\pgwinal\testpg")
-DICT = Path(r"D:\mimo\pgwinal\dict\pgwalnew_dict_aphx.sqlite")
+DICT = Path(r"D:\mimo\pgwinal\dict\pgwal_dict_aphx.sqlite")
 
 
 class TestCrc32c(unittest.TestCase):
@@ -81,7 +81,7 @@ class TestFramingReal(unittest.TestCase):
     def test_first_segments(self):
         if not WAL_DIR.exists():
             self.skipTest("testpg 数据不存在")
-        from pgwalnew.xlogreader import WalStream, collect_wal_files
+        from pgwal.xlogreader import WalStream, collect_wal_files
         files = collect_wal_files(WAL_DIR)[:2]
         stream = WalStream(files, profile=P.get_profile(12),
                            system_id=7579057487605995718)
@@ -98,7 +98,7 @@ class TestXlsx(unittest.TestCase):
     def test_roundtrip(self):
         import tempfile
         import zipfile
-        from pgwalnew.xlsx import write_xlsx
+        from pgwal.xlsx import write_xlsx
         headers = ["id", "op", "备注"]
         rows = [(1, "INSERT", "中文内容&<tag>"), (2, "DELETE", None),
                 (3, "UPDATE", "a" * 40000)]  # 超长截断 + 非法控制字符

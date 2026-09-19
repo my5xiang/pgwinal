@@ -32,9 +32,9 @@ cd D:\mimo\pgwinal
 py -m pip install PySide6 crc32c        # GUI 与 CRC 加速（核心解析仅需 crc32c）
 
 # CLI：解析真实数据（字典用补丁版：含主键信息，DELETE/UPDATE 按主键精简）
-python -m pgwalnew parse D:\mimo\pgwinal\testpg ^
-    --dict D:\mimo\pgwinal\dict\pgwalnew_dict_aphx.sqlite ^
-    --out result\pgwalnew_results.sqlite --export-do result\do.sql --export-undo result\undo.sql
+python -m pgwal parse D:\mimo\pgwinal\testpg ^
+    --dict D:\mimo\pgwinal\dict\pgwal_dict_aphx.sqlite ^
+    --out result\pgwal_results.sqlite --export-do result\do.sql --export-undo result\undo.sql
 
 # GUI（布局继承旧项目：双行工具栏/左右分栏/结果着色/底部日志）
 python run_gui.py
@@ -43,13 +43,13 @@ python run_gui.py
 python -m unittest discover tests -v
 
 # M0 帧级验证报告
-python tools\validate_framing.py D:\mimo\pgwinal\testpg --dict D:\mimo\pgwinal\dict\pgwalnew_dict_aphx.sqlite
+python tools\validate_framing.py D:\mimo\pgwinal\testpg --dict D:\mimo\pgwinal\dict\pgwal_dict_aphx.sqlite
 ```
 
 从在线库生成新字典（需 psycopg2）：
 
 ```powershell
-python -m pgwalnew dict --dsn "postgresql://user:pass@host:5432/db" --out dict.sqlite
+python -m pgwal dict --dsn "postgresql://user:pass@host:5432/db" --out dict.sqlite
 ```
 
 ## 结果表（对齐 walminer_contents）
@@ -64,7 +64,7 @@ WHERE op = 'DELETE' AND executable = 1;
 - `undo_source`：`record`（WAL 记录内）/ `history`（流内历史）/ `fpi`（页像重放）/ `incomplete`
 - `executable`：五条件全满足（CRC/字典映射/类型完整/UNDO 来源/SQL 合法）
 
-## 架构（实现于 `pgwalnew/`）
+## 架构（实现于 `pgwal/`）
 
 ```
 xlogreader.py   严格帧扫描：CRC32C(body‖header[0:20]) + prev 链 + 跨页/跨段续记录

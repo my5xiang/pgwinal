@@ -1,9 +1,9 @@
 @echo off
 rem ============================================================
-rem  pgwalnew GUI launcher
+rem  pgwal GUI launcher
 rem  PostgreSQL WAL offline parser / DML recovery tool
 rem ============================================================
-title pgwalnew - WAL Parser
+title pgwal - WAL Parser
 cd /d "%~dp0"
 
 rem ---- find python ----
@@ -32,14 +32,14 @@ if errorlevel 1 (
     choice /C YN /M "Install now"
     if errorlevel 2 (
         echo [TIP] CLI still works without PySide6:
-        echo        %PY% -m pgwalnew parse WALDIR --dict dict.sqlite --out result.sqlite
+        echo        %PY% -m pgwal parse WALDIR --dict dict.sqlite --out result.sqlite
         pause
         exit /b 1
     )
     %PY% -m pip install PySide6
 )
 
-echo Starting pgwalnew GUI ...
+echo Starting pgwal GUI ...
 %PY% -X utf8 run_gui.py
 if errorlevel 1 (
     echo.
