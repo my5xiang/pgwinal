@@ -1,4 +1,4 @@
-# pgwinalnew
+# pgwinal
 
 Windows 平台 **PostgreSQL WAL 离线解析 / DML 数据恢复**独立程序（非插件、带 GUI），目标对齐 Linux 上的 walminer。
 
