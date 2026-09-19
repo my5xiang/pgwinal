@@ -350,7 +350,7 @@ class MainWindow(QMainWindow):
 
         add_btn("添加文件", self.on_add_files)
         add_btn("添加目录", self.on_add_dir)
-        add_btn("清空", self.on_clear_wal)
+        add_btn("清空全部", self.on_clear_wal)
         add_sep()
         add_btn("生成字典", self.on_build_dict)
         add_btn("切换字典", self.on_switch_dict)
@@ -614,9 +614,22 @@ class MainWindow(QMainWindow):
         self._log(f"已从目录导入 {len(files)} 个文件", "ok")
 
     def on_clear_wal(self):
+        """清空全部：WAL 列表 + 字典选择 + 结果表 + 日志。"""
+        # WAL 列表
         self.wal_paths.clear()
         self._refresh_wal_list()
-        self._log("WAL 列表已清空", "warn")
+        # 字典选择
+        self.dict_path = None
+        self._load_dict_info()
+        # 结果表
+        self.table.setRowCount(0)
+        self.row_count_label.setText("0 rows")
+        # 日志
+        self.log.clear()
+        self._log("已清空：WAL 列表 / 字典选择 / 结果 / 日志", "warn")
+        self._update_stats()
+        self.status_label.setText("已清空")
+        self.status_dot.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 8pt;")
 
     def _refresh_wal_list(self):
         self.wal_list.clear()
