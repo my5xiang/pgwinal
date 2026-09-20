@@ -282,6 +282,11 @@ class MainWindow(QMainWindow):
         self.dict_worker = None
         self._page = 0
         self._buttons: list[QPushButton] = []
+        # 结果库长连接 + 分页缓存（避免每页重开连接/重复 COUNT/OFFSET 深扫）
+        self._rc = None            # 只读长连接
+        self._total = 0            # 当前筛选下的总数（仅筛选变化时重算）
+        self._first_ids: list = [] # 已访问各页首行 id（keyset 上界）
+        self._last_id = 0          # 当前最新页末行 id（keyset 游标）
 
         self._build_toolbar()
         self._build_body()
@@ -509,11 +514,13 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(28)
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        # ID 列用固定宽（ResizeToContents 会在每次填 500 行时全表重算，拖慢翻页）
+        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
         for i in range(1, 6):
             hdr.setSectionResizeMode(i, QHeaderView.Interactive)
         for i in (6, 7):
             hdr.setSectionResizeMode(i, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 80)
         self.table.setColumnWidth(1, 130)
         self.table.setColumnWidth(2, 80)
         self.table.setColumnWidth(3, 150)
@@ -809,6 +816,7 @@ class MainWindow(QMainWindow):
         self._log(
             f"解析成功 · 结果 {n} 条 · 提交 {stats.get('commits', 0)} · "
             f"耗时 {stats.get('elapsed', '?')}s", "ok")
+        self._close_result_conn()   # 结果文件已被重写，重开连接
         self._page = 0
         self.refresh_results()
         self._update_stats()
@@ -818,6 +826,10 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         self._log(f"解析失败: {msg}", "err")
         QMessageBox.critical(self, "解析失败", msg)
+
+    def closeEvent(self, event):
+        self._close_result_conn()
+        super().closeEvent(event)
 
     # ── 结果表 ────────────────────────────────────────────────
     def _where(self):
@@ -836,8 +848,53 @@ class MainWindow(QMainWindow):
             conds.append("executable=0")
         return " AND ".join(conds), args
 
+    # ── 结果库长连接（翻页不再重复建连/冷缓存）────────────────
+    def _result_conn(self):
+        """惰性建立只读长连接：64MB 页缓存 + mmap + 补建 executable 索引。"""
+        if self._rc is None:
+            p = Path(self.result_path)
+            if not p.exists():
+                return None
+            try:
+                conn = sqlite3.connect(str(p))
+                # 旧结果文件补建索引（幂等；新解析的文件已含）
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_wc_exec "
+                             "ON walminer_contents(executable)")
+                conn.commit()
+                conn.execute("PRAGMA query_only=1")
+                conn.execute("PRAGMA cache_size=-65536")     # 64MB 页缓存
+                conn.execute("PRAGMA mmap_size=268435456")   # 256MB mmap
+                self._rc = conn
+            except Exception:
+                return None
+        return self._rc
+
+    def _close_result_conn(self):
+        """结果文件被重写（重新解析）后必须重开连接。"""
+        if self._rc is not None:
+            try:
+                self._rc.close()
+            except Exception:
+                pass
+            self._rc = None
+
     def refresh_results(self):
         self._page = 0
+        self._first_ids = []
+        self._last_id = 0
+        # 总数只在筛选变化/重新解析时算一次，翻页复用
+        conn = self._result_conn()
+        if conn is None:
+            self._total = 0
+        else:
+            where, args = self._where()
+            try:
+                self._total = conn.execute(
+                    f"SELECT COUNT(*) FROM walminer_contents WHERE {where}",
+                    args).fetchone()[0]
+            except Exception as e:
+                self._total = 0
+                self._log(f"统计失败: {e}", "err")
         self._load_page()
 
     def reset_filter(self):
@@ -847,31 +904,53 @@ class MainWindow(QMainWindow):
         self.refresh_results()
 
     def turn_page(self, d):
-        self._page = max(0, self._page + d)
+        new = max(0, self._page + d)
+        if new == self._page:
+            return
+        self._page = new
         self._load_page()
 
     def _load_page(self):
-        if not Path(self.result_path).exists():
+        conn = self._result_conn()
+        if conn is None:
+            self.table.setRowCount(0)
             self.row_count_label.setText("0 rows")
             return
-        try:
-            conn = sqlite3.connect(f"file:{Path(self.result_path).as_posix()}?mode=ro", uri=True)
-        except Exception:
-            return
         where, args = self._where()
+        _COLS = ("id,start_lsn,xid,commit_ts,op,schema_name,table_name,"
+                 "substr(do_sql,1,400),substr(undo_sql,1,400)")
         try:
-            total = conn.execute(
-                f"SELECT COUNT(*) FROM walminer_contents WHERE {where}", args).fetchone()[0]
-            rows = conn.execute(
-                f"SELECT id,start_lsn,xid,commit_ts,op,schema_name,table_name,"
-                f"do_sql,undo_sql FROM walminer_contents WHERE {where} "
-                f"ORDER BY id LIMIT {PAGE_SIZE} OFFSET {self._page * PAGE_SIZE}", args).fetchall()
+            if self._page < len(self._first_ids):
+                # 回看已访问页：用记录的页边界（结果只读静态，边界稳定）
+                lo = self._first_ids[self._page]
+                hi = (self._first_ids[self._page + 1]
+                      if self._page + 1 < len(self._first_ids) else None)
+                cond, qargs = f"({where}) AND id>=?", [*args, lo]
+                if hi is not None:
+                    cond += " AND id<?"
+                    qargs.append(hi)
+                rows = conn.execute(
+                    f"SELECT {_COLS} FROM walminer_contents "
+                    f"WHERE {cond} ORDER BY id LIMIT {PAGE_SIZE}",
+                    qargs).fetchall()
+            else:
+                # 前进新页：keyset（id > 上页末行），O(本页行数) 而非 O(偏移)
+                rows = conn.execute(
+                    f"SELECT {_COLS} FROM walminer_contents "
+                    f"WHERE ({where}) AND id>? ORDER BY id LIMIT {PAGE_SIZE}",
+                    [*args, self._last_id]).fetchall()
+                if not rows and self._page > 0:
+                    self._page -= 1          # 已到末尾，停在最后一页
+                    return
+                if rows:
+                    if self._page == len(self._first_ids):
+                        self._first_ids.append(rows[0][0])
+                    self._last_id = rows[-1][0]
         except Exception as e:
-            conn.close()
             self._log(f"刷新失败: {e}", "err")
             return
-        conn.close()
 
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             items = [str(r[0]), r[1], str(r[2]), r[3] or "", r[4],
@@ -884,24 +963,23 @@ class MainWindow(QMainWindow):
                 if j >= 6:
                     it.setToolTip(r[7] if j == 6 else r[8])
                 self.table.setItem(i, j, it)
-        pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-        self.row_count_label.setText(f"显示 {len(rows)} / 总计 {total} · 第 {self._page + 1}/{pages} 页")
+        self.table.setUpdatesEnabled(True)
+        pages = max(1, (self._total + PAGE_SIZE - 1) // PAGE_SIZE)
+        self.row_count_label.setText(f"显示 {len(rows)} / 总计 {self._total} · 第 {self._page + 1}/{pages} 页")
 
     def on_detail(self, index):
         item = self.table.item(index.row(), 0)
         if item is None:
             return
         rid = item.text()
-        try:
-            conn = sqlite3.connect(f"file:{Path(self.result_path).as_posix()}?mode=ro", uri=True)
-        except Exception:
+        conn = self._result_conn()
+        if conn is None:
             return
         cur = conn.execute(
             "SELECT sqlno,xid,op,commit_ts,start_lsn,schema_name,table_name,"
             "undo_source,executable,row_data,old_row_data,do_sql,undo_sql,notes "
             "FROM walminer_contents WHERE id=?", (rid,))
         r = cur.fetchone()
-        conn.close()
         if r:
             cols = ("sqlno xid op commit_ts start_lsn schema_name table_name "
                     "undo_source executable row_data old_row_data do_sql undo_sql notes").split()
@@ -920,11 +998,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         nres = 0
-        if Path(self.result_path).exists():
+        conn = self._result_conn()
+        if conn is not None:
             try:
-                conn = sqlite3.connect(f"file:{Path(self.result_path).as_posix()}?mode=ro", uri=True)
                 nres = conn.execute("SELECT COUNT(*) FROM walminer_contents").fetchone()[0]
-                conn.close()
             except Exception:
                 pass
         self.stat_label.setText(f"字典 {nrel} 表 · WAL {nwal} · 结果 {nres}")
@@ -969,7 +1046,9 @@ class MainWindow(QMainWindow):
     def _export_xlsx(self, path) -> int:
         """标准 OOXML xlsx 导出（pgwal.xlsx 模块）。"""
         from ..xlsx import write_xlsx
-        conn = sqlite3.connect(f"file:{Path(self.result_path).as_posix()}?mode=ro", uri=True)
+        conn = self._result_conn()
+        if conn is None:
+            return 0
 
         def rows():
             for r in conn.execute(
@@ -983,7 +1062,7 @@ class MainWindow(QMainWindow):
         try:
             return write_xlsx(path, headers, rows())
         finally:
-            conn.close()
+            pass
 
 
 def main():

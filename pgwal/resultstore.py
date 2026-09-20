@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS walminer_contents (
 CREATE INDEX IF NOT EXISTS idx_wc_xid ON walminer_contents(xid);
 CREATE INDEX IF NOT EXISTS idx_wc_op ON walminer_contents(op);
 CREATE INDEX IF NOT EXISTS idx_wc_table ON walminer_contents(schema_name, table_name);
+CREATE INDEX IF NOT EXISTS idx_wc_exec ON walminer_contents(executable);
 CREATE TABLE IF NOT EXISTS parse_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT, finished_at TEXT, wal_files TEXT, stats TEXT
